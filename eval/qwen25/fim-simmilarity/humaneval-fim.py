@@ -127,6 +127,7 @@ def humaneval_fim(custom_args: Optional[argparse.Namespace] = None) -> None:
         parser.add_argument("--gen_length", type=int, default=64)
         parser.add_argument("--max_seq_length", type=int, default=2048)
         parser.add_argument("--max_model_length", type=int, default=8192, help="max vllm model length")
+        parser.add_argument("--vram_utilization", type=float, default=0.1, help="vllm gpu vram utilization")
         parser.add_argument("--right_context_length", type=int, default=512)
         parser.add_argument("--output_dir", type=str, default="output_dir")
         parser.add_argument('--input_file', type=str, default="./hm_fim/data/fim_singleline.jsonl",
@@ -150,7 +151,8 @@ def humaneval_fim(custom_args: Optional[argparse.Namespace] = None) -> None:
         trust_remote_code=True,
         distributed_executor_backend="mp",
         enforce_eager=True,
-        max_model_len=args.max_model_length
+        max_model_len=args.max_model_length,
+        gpu_memory_utilization=args.vram_utilization
     )
     # Process input file
     results_file = os.path.join(args.output_dir, "ans.jsonl")
