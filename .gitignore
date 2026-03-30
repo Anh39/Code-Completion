@@ -1,3 +1,16 @@
+# Custom
+*.gitignore
+eval/qwen25/fim-simmilarity/data/*
+quantize/llama.cpp/*
+quantize/llama-b7475-bin-win-cpu-x64/*
+quantize/merged/*
+quantize/quantized/*
+data/data/*
+data/old/*
+loras/*
+*/.vscode/*
+*.zip
+old/*
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
