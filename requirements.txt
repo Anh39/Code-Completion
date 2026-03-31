@@ -1,0 +1,5 @@
+aioboto3==15.5.0
+tqdm==4.67.3
+transformers==5.4.0
+datasets==4.8.4
+peft==0.18.1
