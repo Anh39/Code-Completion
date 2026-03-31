@@ -18,8 +18,8 @@ from peft import LoraConfig, get_peft_model
 from typing import Any
 
 MODEL_ID = "Qwen/Qwen2.5-Coder-0.5B" 
-DATA_PATH = "data/train_data_repo_v4fw.jsonl"
-OUTPUT_DIR = "qwen25-05-m-v4fwr"
+DATA_PATH = "data/train_data_repo_v7.jsonl"
+OUTPUT_DIR = "qwen25-05-m-v7_v6"
 MAX_LENGTH = 2048
 
 def set_seed(seed=42):
@@ -52,37 +52,61 @@ class RepoLevelDataset(Dataset):
         self.max_length = max_length
         self.fim_rate = fim_rate
         
-        self.fim_prefix = tokenizer.convert_tokens_to_ids(PRE)
-        self.fim_middle = tokenizer.convert_tokens_to_ids(MID)
-        self.fim_suffix = tokenizer.convert_tokens_to_ids(SUF)
+        self.fim_prefix: int = tokenizer.convert_tokens_to_ids(PRE)
+        self.fim_middle: int = tokenizer.convert_tokens_to_ids(MID)
+        self.fim_suffix: int = tokenizer.convert_tokens_to_ids(SUF)
         self.eos_token_id = tokenizer.eos_token_id
         self.ratios = [0.6, 0.1, 0.3]
+        self.first = True
     def __len__(self):
         return len(self.data)
-    def _apply_fim_original(self, text: str):
-        first_line, text = text.split("\n", 1)
-        tokens = self.tokenizer.encode(text)
-        if len(tokens) < 10: 
-            return first_line + "\n" + text
-        idx1 = torch.randint(1, len(tokens) - 5, (1,)).item()
-        idx2 = torch.randint(idx1 + 1, len(tokens) - 1, (1,)).item()
-        prefix, middle, suffix = tokens[:idx1], tokens[idx1:idx2], tokens[idx2:]
+    def _comment_out_context(self, context_str):
+        lines = context_str.split('\n')
+        commented_lines = ["# " + line if line.strip() and not line.strip().startswith("#") else line for line in lines]
+        return "\n".join(commented_lines)
+    # def _apply_fim(self, text: str) -> str:
+    #     return self.get_intra_file_random_span_token_level(text)
+    def _apply_fim(self, text: str):
+        tokens = self.tokenizer.encode(text, add_special_tokens=False)
+        if len(tokens) < 10: return text
+        index_1 = random.randint(1, len(tokens)-5)
+        index_2 = random.randint(index_1 + 1, len(tokens)-1)
+        prefix, middle, suffix = tokens[:index_1], tokens[index_1:index_2], tokens[index_2:]
         input_ids = [self.fim_prefix] + prefix + [self.fim_suffix] + suffix + [self.fim_middle] + middle
-        return first_line + "\n" + self.tokenizer.decode(input_ids)
-    def _apply_fim(self, text: str) -> str:
-        first_line, rest = text.split("\n", 1)
-        rest = self.get_intra_file_random_span_token_level(text)
-        return first_line + "\n" + rest
+        return self.tokenizer.decode(input_ids)
     def __getitem__(self, index):
         sample = self.data[index]
-        header = sample["header"]
-        cfc = "".join(item["text"] for item in sample["cfc_contexts"])
+        repo_header = REPO + sample["repo_name"] + "\n"
+        cfc = "".join(FILE + item["path"] + "\n" + item["text"] for item in sample["cfc_contexts"])
+        header: str = FILE + sample["path"] + "\n"
         content: str = sample["content"]
+        use_fim = False
         if random.random() < self.fim_rate:
-            content = self._apply_fim_original(content)
-        total = header+cfc+content+EOT
-        return self.tokenizer(total, truncation=False, padding=False, max_length=2048)
-            
+            use_fim = True
+            content = self._apply_fim(content)
+        total = (
+            repo_header 
+            + cfc
+            + header
+            + content
+            + EOT
+        )
+        ids = self.tokenizer.encode(total, truncation=False, padding=False, max_length=self.max_length, add_special_tokens=False)
+        use_fim = self.fim_middle in ids
+        if use_fim:
+            if self.first:
+                self.first = False
+                with open("/root/workspace/sample.py", 'w', encoding='utf-8') as file:
+                    file.write(total) 
+                    # print(total)
+            mid_idx = ids.index(self.fim_middle)
+            labels = [-100 if idx <= mid_idx else id for idx, id in enumerate(ids)]
+        else:
+            labels = ids.copy()
+        return {
+            "input_ids": ids,
+            "labels": labels
+        }
     def uniform(self, n: int) -> tuple[int, int, int]:        
         r2 = random.random() * 2 * 0.1 # E(r1) = 0.1, 0 <= r1 <= 0.1
         r3 = random.random() * 2 * 0.3 # E(r3) = 0.3, 0 <= r3 <= 0.6
@@ -122,38 +146,25 @@ class RepoLevelDataset(Dataset):
         pre_length, mid_length, suf_length = self.gaussian(n)
         start = pre_length
         return self.extract_sample(ids, start, mid_length)
-class CustomCausalCollator:
-    def __init__(self, tokenizer: Qwen2Tokenizer) -> None:
-        self.tokenizer = tokenizer
-        self.fim_middle = tokenizer.convert_tokens_to_ids(MID)
-        self.file_sep = tokenizer.convert_tokens_to_ids(FILE)
-        # print(self.fim_middle, self.file_sep)
-    def __call__(self, features) -> Any:
-        batch = self.tokenizer.pad(
-            features,
-            return_tensors="pt"
-        )
-        input_ids = batch["input_ids"]
-        labels = input_ids.clone()
-        labels[labels == self.tokenizer.pad_token_id] = -100
-        for i in range(input_ids.size(0)):
-            row = input_ids[i]
-            pos = (row == self.fim_middle).nonzero(as_tuple=True)
-            if pos[0].numel() > 0:
-                # Has <|fim_middle|>
-                mid_idx = pos[0].item()
-                labels[i, :mid_idx+1] = -100 # Mask <|fim_middle|> too   
-            else:
-                pos = (row == self.file_sep).nonzero(as_tuple=True)
-                file_idx = pos[0][-1].item()
-                labels[i, :file_idx+1] = -100 # Mask <|file_sep|> too
-        batch["labels"] = labels
-        return batch
-tokenizer = AutoTokenizer.from_pretrained(MODEL_ID, trust_remote_code=True, use_fast=True, padding_side="right")
+def collate_fn(batch):
+    max_len = max(len(x["input_ids"]) for x in batch)
+    input_ids, labels, attention_mask = [], [], []
+    pad_token_id = tokenizer.pad_token_id 
+    for item in batch:
+        l = len(item["input_ids"])
+        pad_len = max_len - l
+        input_ids.append(item["input_ids"] + [pad_token_id] * pad_len)
+        labels.append(item["labels"] + [-100] * pad_len)
+        attention_mask.append([1] * l + [0] * pad_len)
+    return {
+        "input_ids": torch.tensor(input_ids),
+        "labels": torch.tensor(labels),
+        "attention_mask": torch.tensor(attention_mask)
+    }
+tokenizer = AutoTokenizer.from_pretrained(MODEL_ID, trust_remote_code=True, use_fast=True)
 # tokenizer.pad_token = tokenizer.eos_token = "<|endoftext|>"
 # --- Dataset ---
 dataset = RepoLevelDataset(DATA_PATH, tokenizer, 2048, 0.5)
-data_collator = CustomCausalCollator(tokenizer)
 model = AutoModelForCausalLM.from_pretrained(
     MODEL_ID,
     torch_dtype=torch.bfloat16,
@@ -163,6 +174,7 @@ model = AutoModelForCausalLM.from_pretrained(
 )
 
 model.gradient_checkpointing_enable()
+model.enable_input_require_grads()    
 model.config.use_cache = False
 
 # --- LoRA config ---
@@ -182,23 +194,23 @@ model.print_trainable_parameters()
 # --- Training ---
 args = TrainingArguments(
     output_dir=OUTPUT_DIR,
-    per_device_train_batch_size=4,
-    gradient_accumulation_steps=4,
+    per_device_train_batch_size=2,
+    gradient_accumulation_steps=8,
     learning_rate=2e-4,
     num_train_epochs=1,
     fp16=False,
     bf16=True,               # enables CUDA bfloat16
     logging_steps=10,
     save_strategy="steps",
-    save_steps=100, # 4096 samples
+    save_steps=1000, # 4096 samples
     save_total_limit=100,      
     gradient_checkpointing=True, 
     save_safetensors=True,   # ✅ use safetensors format (recommended)
-    optim="adamw_torch",
+    optim="adafactor",
     report_to="none",
     remove_unused_columns=False,
     ddp_find_unused_parameters=False
 )
 
-trainer = Trainer(model=model, args=args, train_dataset=dataset, data_collator=data_collator)
+trainer = Trainer(model=model, args=args, train_dataset=dataset, data_collator=collate_fn)
 trainer.train()
